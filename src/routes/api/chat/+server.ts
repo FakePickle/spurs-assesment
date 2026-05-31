@@ -1,87 +1,73 @@
 import { json, error } from '@sveltejs/kit';
-import { supabaseAdmin } from '$lib/server/supabase';
-import { getModel } from '$lib/server/gemma';
+import { getOrCreateConversation, saveMessage, getHistory } from '$lib/services/db';
+import { getCachedHistory, setCachedHistory, invalidateCache } from '$lib/services/cache';
+import { generateReply } from '$lib/services/llm';
 import type { RequestHandler } from './$types';
 
+const MAX_INPUT_CHARS = 2000;
+
 // POST /api/chat
-// Body: { message: string, conversationId?: string }
-// Response: { conversationId: string, message: { id, role, content, timestamp } }
+// Body: { message: string, sessionId: string }
+// Response: { sessionId, userMessage, assistantMessage }
 export const POST: RequestHandler = async ({ request }) => {
-	const body = await request.json().catch(() => null);
-	if (!body?.message?.trim()) error(400, 'message is required');
-
-	const userText: string = body.message.trim();
-	let conversationId: string = body.conversationId ?? '';
-
-	// Create a new conversation if one wasn't provided
-	if (!conversationId) {
-		const { data, error: err } = await supabaseAdmin
-			.from('conversations')
-			.insert({ metadata: {} })
-			.select('id')
-			.single();
-		if (err) error(500, 'Failed to create conversation: ' + err.message);
-		conversationId = data.id;
-	} else {
-		// Verify the conversation exists
-		const { data, error: err } = await supabaseAdmin
-			.from('conversations')
-			.select('id')
-			.eq('id', conversationId)
-			.single();
-		if (err || !data) error(404, 'Conversation not found');
+	let body: unknown;
+	try {
+		body = await request.json();
+	} catch {
+		error(400, 'Invalid JSON body');
 	}
 
-	// Fetch prior messages to build chat history
-	const { data: history, error: histErr } = await supabaseAdmin
-		.from('messages')
-		.select('role, content')
-		.eq('conversation_id', conversationId)
-		.order('timestamp', { ascending: true });
+	const { message, sessionId } = body as { message?: unknown; sessionId?: unknown };
 
-	if (histErr) error(500, 'Failed to load history: ' + histErr.message);
+	if (!message || typeof message !== 'string' || !message.trim()) {
+		error(400, 'message is required and must be a non-empty string');
+	}
+	if (!sessionId || typeof sessionId !== 'string') {
+		error(400, 'sessionId is required');
+	}
 
-	// Save the user's message
-	const { data: userMsg, error: userErr } = await supabaseAdmin
-		.from('messages')
-		.insert({ conversation_id: conversationId, role: 'user', content: userText })
-		.select('id, role, content, timestamp')
-		.single();
+	const userText = message.trim().slice(0, MAX_INPUT_CHARS);
 
-	if (userErr) error(500, 'Failed to save user message: ' + userErr.message);
+	let conversationId: string;
+	try {
+		conversationId = await getOrCreateConversation(sessionId);
+	} catch (e: unknown) {
+		error(500, e instanceof Error ? e.message : 'Database error');
+	}
 
-	// Build the Gemma chat history (prior messages only, not the current one)
-	const chatHistory = (history ?? []).map((msg) => ({
-		role: msg.role === 'assistant' ? 'model' : 'user',
-		parts: [{ text: msg.content }]
-	}));
+	// Load history — Redis first, fall back to DB
+	let history: { role: string; content: string }[];
+	try {
+		const cached = await getCachedHistory(sessionId);
+		if (cached) {
+			history = cached as { role: string; content: string }[];
+		} else {
+			history = await getHistory(conversationId);
+			await setCachedHistory(sessionId, history);
+		}
+	} catch {
+		history = [];
+	}
 
-	// Call Gemma
+	// Generate AI reply
 	let assistantText: string;
 	try {
-		const model = getModel();
-		const chat = model.startChat({ history: chatHistory });
-		const result = await chat.sendMessage(userText);
-		console.log('Gemma result:', result);
-		assistantText = result.response.text();
-		console.log('Gemma response:', assistantText);
+		assistantText = await generateReply(history, userText);
 	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
-		error(502, 'Gemma API error: ' + msg);
+		error(502, e instanceof Error ? e.message : 'AI service error');
 	}
 
-	// Save the assistant's response
-	const { data: assistantMsg, error: assistantErr } = await supabaseAdmin
-		.from('messages')
-		.insert({ conversation_id: conversationId, role: 'assistant', content: assistantText })
-		.select('id, role, content, timestamp')
-		.single();
+	// Persist both messages
+	let userMsg, assistantMsg;
+	try {
+		userMsg = await saveMessage(conversationId, 'user', userText);
+		assistantMsg = await saveMessage(conversationId, 'assistant', assistantText);
+	} catch (e: unknown) {
+		error(500, e instanceof Error ? e.message : 'Failed to save messages');
+	}
 
-	if (assistantErr) error(500, 'Failed to save assistant message: ' + assistantErr.message);
+	// Invalidate cache so next request gets fresh history from DB
+	await invalidateCache(sessionId);
 
-	return json({
-		conversationId,
-		userMessage: userMsg,
-		assistantMessage: assistantMsg
-	});
+	return json({ sessionId, userMessage: userMsg, assistantMessage: assistantMsg });
 };

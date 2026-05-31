@@ -1,20 +1,40 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
 
 	type Message = {
 		id: string;
 		role: 'user' | 'assistant';
 		content: string;
-		timestamp: string;
+		created_at: string;
 	};
 
-	let conversationId = $state<string | null>(null);
+	let sessionId = $state<string | null>(null);
 	let messages = $state<Message[]>([]);
 	let input = $state('');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 
 	let messagesEl = $state<HTMLDivElement | null>(null);
+
+	onMount(async () => {
+		let id = localStorage.getItem('sessionId');
+		if (!id) {
+			id = crypto.randomUUID();
+			localStorage.setItem('sessionId', id);
+		}
+		sessionId = id;
+
+		try {
+			const res = await fetch(`/api/history?sessionId=${encodeURIComponent(id)}`);
+			if (res.ok) {
+				const data = await res.json();
+				messages = data.messages ?? [];
+				await scrollToBottom();
+			}
+		} catch {
+			// history load failure is non-fatal — just start fresh
+		}
+	});
 
 	async function scrollToBottom() {
 		await tick();
@@ -23,7 +43,7 @@
 
 	async function sendMessage() {
 		const text = input.trim();
-		if (!text || loading) return;
+		if (!text || loading || !sessionId) return;
 
 		input = '';
 		error = null;
@@ -33,7 +53,7 @@
 		const tempId = crypto.randomUUID();
 		messages = [
 			...messages,
-			{ id: tempId, role: 'user', content: text, timestamp: new Date().toISOString() }
+			{ id: tempId, role: 'user', content: text, created_at: new Date().toISOString() }
 		];
 		await scrollToBottom();
 
@@ -41,7 +61,7 @@
 			const res = await fetch('/api/chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ message: text, conversationId })
+				body: JSON.stringify({ message: text, sessionId })
 			});
 
 			if (!res.ok) {
@@ -51,15 +71,13 @@
 
 			const data = await res.json();
 
-			// Replace the temp user message with the confirmed one, then add assistant
-			conversationId = data.conversationId;
+			// Replace the optimistic message with server-confirmed ones
 			messages = [
 				...messages.filter((m) => m.id !== tempId),
 				data.userMessage,
 				data.assistantMessage
 			];
 		} catch (e: unknown) {
-			// Remove the optimistic message on failure
 			messages = messages.filter((m) => m.id !== tempId);
 			error = e instanceof Error ? e.message : 'Something went wrong';
 		} finally {
@@ -207,11 +225,11 @@
 				</svg>
 			</div>
 			<div>
-				<h1 class="text-sm font-semibold text-zinc-100">Gemini Chat</h1>
-				{#if conversationId}
-					<p class="font-mono text-xs text-zinc-500">{conversationId}</p>
+				<h1 class="text-sm font-semibold text-zinc-100">Sparq Store Support</h1>
+				{#if sessionId}
+					<p class="font-mono text-xs text-zinc-500">{sessionId}</p>
 				{:else}
-					<p class="text-xs text-zinc-500">New conversation</p>
+					<p class="text-xs text-zinc-500">Starting session…</p>
 				{/if}
 			</div>
 		</div>
@@ -239,8 +257,10 @@
 							/>
 						</svg>
 					</div>
-					<h2 class="text-lg font-medium text-zinc-200">Start a conversation</h2>
-					<p class="mt-1 text-sm text-zinc-500">Ask Gemini anything below.</p>
+					<h2 class="text-lg font-medium text-zinc-200">Welcome to Sparq Store Support</h2>
+					<p class="mt-1 text-sm text-zinc-500">
+						Ask about shipping, returns, or anything else we can help with.
+					</p>
 				</div>
 			{/if}
 
@@ -286,7 +306,7 @@
 								? 'text-right'
 								: 'text-left'}"
 						>
-							{formatTime(message.timestamp)}
+							{formatTime(message.created_at)}
 						</p>
 					</div>
 				</div>
@@ -354,7 +374,7 @@
 				<textarea
 					bind:value={input}
 					onkeydown={handleKeydown}
-					placeholder="Message Gemini... (Enter to send, Shift+Enter for newline)"
+					placeholder="Ask about shipping, returns, or support hours… (Enter to send)"
 					rows="1"
 					disabled={loading}
 					class="field-sizing-content max-h-36 min-h-10 flex-1 resize-none rounded-xl border-zinc-700 bg-zinc-950 py-2.5 pr-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-zinc-400 focus:ring-zinc-400 disabled:bg-zinc-900 disabled:text-zinc-500"

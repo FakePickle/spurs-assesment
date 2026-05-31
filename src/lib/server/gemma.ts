@@ -2,35 +2,22 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GOOGLE_AI_API_KEY, GEMINI_MODEL } from '$env/static/private';
 
 const genAI = new GoogleGenerativeAI(GOOGLE_AI_API_KEY);
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
-const SUPPORTED_GEMINI_MODELS = new Set(['gemini-2.5-flash']);
+const DEFAULT_MODEL = 'gemini-2.0-flash';
+const SUPPORTED_MODELS = new Set(['gemini-2.0-flash', 'gemini-2.5-flash']);
 
-const systemInstruction = [
-	'You are a helpful conversational assistant.',
-	'Reply with only the final answer that should be shown to the user.',
-	'Keep replies direct and natural.',
-	'Do not include labels, hidden notes, analysis, constraints, goals, alternatives, or drafts.'
-].join(' ');
-
-function getGemmaModelName() {
-	const configuredModel = GEMINI_MODEL?.trim();
-
-	if (!configuredModel) return DEFAULT_GEMINI_MODEL;
-	if (SUPPORTED_GEMINI_MODELS.has(configuredModel)) return configuredModel;
-
-	console.warn(
-		`Unsupported GEMINI_MODEL "${configuredModel}". Falling back to ${DEFAULT_GEMINI_MODEL}.`
-	);
-	return DEFAULT_GEMINI_MODEL;
+function resolveModelName(): string {
+	const configured = GEMINI_MODEL?.trim();
+	if (!configured) return DEFAULT_MODEL;
+	if (SUPPORTED_MODELS.has(configured)) return configured;
+	console.warn(`Unsupported GEMINI_MODEL "${configured}". Falling back to ${DEFAULT_MODEL}.`);
+	return DEFAULT_MODEL;
 }
 
-export function getModel() {
+export function getModel(systemInstruction: string) {
 	return genAI.getGenerativeModel({
-		model: getGemmaModelName(),
+		model: resolveModelName(),
 		systemInstruction,
-		generationConfig: {
-			temperature: 0.3
-		}
+		generationConfig: { temperature: 0.3 }
 	});
 }
 
